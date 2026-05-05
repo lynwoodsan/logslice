@@ -1,50 +1,53 @@
-"""High-level output pipeline: applies filters and writes formatted results."""
+"""Process and output filtered log lines, optionally collecting stats."""
 
-import re
-import sys
-from typing import Iterator, Optional, TextIO
+from typing import Iterable, Iterator, Optional, TextIO
 
 from logslice.filters import (
     extract_level,
+    extract_timestamp,
     matches_level,
     matches_pattern,
     matches_time_range,
 )
-from logslice.formatter import format_line, supports_color
+from logslice.formatter import format_line, write_output
+from logslice.stats import LogStats
 
 
 def process_lines(
-    lines: Iterator[str],
-    start_time: Optional[str] = None,
-    end_time: Optional[str] = None,
-    level_filter: Optional[str] = None,
+    lines: Iterable[str],
+    output: TextIO,
+    *,
+    start_time=None,
+    end_time=None,
+    level: Optional[str] = None,
     pattern: Optional[str] = None,
-    use_color: Optional[bool] = None,
-    stream: TextIO = sys.stdout,
-) -> int:
-    """Filter and write log lines. Returns number of lines written."""
-    compiled_pattern = re.compile(pattern) if pattern else None
-    color = use_color if use_color is not None else supports_color(stream)
-    count = 0
+    color: bool = False,
+    collect_stats: bool = False,
+) -> Optional[LogStats]:
+    """Filter *lines* and write matching ones to *output*.
+
+    Returns a :class:`LogStats` instance when *collect_stats* is True,
+    otherwise returns None.
+    """
+    stats = LogStats() if collect_stats else None
 
     for line in lines:
-        stripped = line.rstrip("\n")
+        line = line.rstrip("\n")
 
-        if start_time or end_time:
-            if not matches_time_range(stripped, start_time, end_time):
-                continue
+        timestamp = extract_timestamp(line)
+        line_level = extract_level(line)
 
-        if level_filter:
-            if not matches_level(stripped, level_filter):
-                continue
+        matched = (
+            matches_time_range(timestamp, start_time, end_time)
+            and matches_level(line_level, level)
+            and matches_pattern(line, pattern)
+        )
 
-        if compiled_pattern:
-            if not matches_pattern(stripped, compiled_pattern):
-                continue
+        if stats is not None:
+            stats.record_line(line, matched=matched, level=line_level, timestamp=timestamp)
 
-        level = extract_level(stripped)
-        formatted = format_line(stripped, level, use_color=color)
-        print(formatted, file=stream)
-        count += 1
+        if matched:
+            formatted = format_line(line, line_level, use_color=color)
+            write_output(formatted, output)
 
-    return count
+    return stats
