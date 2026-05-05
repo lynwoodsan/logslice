@@ -20,6 +20,12 @@ TIMESTAMP_FORMATS = [
     "%m/%d/%Y %H:%M:%S",
 ]
 
+# Canonical log level names; WARN and FATAL are aliases
+LEVEL_ALIASES = {
+    "WARN": "WARNING",
+    "FATAL": "CRITICAL",
+}
+
 
 def extract_timestamp(line: str) -> Optional[datetime]:
     """Extract a datetime object from a log line, if present."""
@@ -36,10 +42,15 @@ def extract_timestamp(line: str) -> Optional[datetime]:
 
 
 def extract_level(line: str) -> Optional[str]:
-    """Extract the log level from a log line, if present."""
+    """Extract the log level from a log line, if present.
+
+    Aliases such as WARN and FATAL are normalized to their canonical
+    forms (WARNING and CRITICAL respectively).
+    """
     match = LOG_LEVEL_PATTERN.search(line)
     if match:
-        return match.group(1).upper()
+        level = match.group(1).upper()
+        return LEVEL_ALIASES.get(level, level)
     return None
 
 
@@ -62,13 +73,20 @@ def matches_time_range(
 
 
 def matches_level(line: str, levels: Optional[list] = None) -> bool:
-    """Return True if the line's log level is in the provided list."""
+    """Return True if the line's log level is in the provided list.
+
+    Level comparisons are case-insensitive, and aliases (WARN, FATAL)
+    are resolved before matching.
+    """
     if not levels:
         return True
     level = extract_level(line)
     if level is None:
         return False
-    return level in [lvl.upper() for lvl in levels]
+    normalized_levels = [
+        LEVEL_ALIASES.get(lvl.upper(), lvl.upper()) for lvl in levels
+    ]
+    return level in normalized_levels
 
 
 def matches_pattern(line: str, pattern: Optional[str] = None) -> bool:
