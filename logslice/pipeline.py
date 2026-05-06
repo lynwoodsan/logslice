@@ -1,67 +1,110 @@
-"""Compose the full processing pipeline for a single log stream."""
+"""Build and run the logslice processing pipeline."""
 
-from typing import Iterable, Iterator, Tuple
+from typing import Iterator, List, Optional
 
-from logslice.context import ContextBuffer
-from logslice.deduplicator import Deduplicator
 from logslice.filters import matches_level, matches_pattern, matches_time_range
 from logslice.highlighter import highlight_matches
+from logslice.context import ContextBuffer
+from logslice.deduplicator import Deduplicator
 from logslice.sampler import Sampler
+from logslice.truncator import Truncator
+from logslice.ratelimiter import RateLimiter
+from logslice.burst_reporter import BurstReporter
+from logslice.fieldextractor import FieldExtractor, parse_field_filters
 
 
 def _apply_filters(
-    lines: Iterable[str],
+    lines: List[str],
     *,
+    level: Optional[str] = None,
+    pattern: Optional[str] = None,
     start=None,
     end=None,
-    level=None,
-    pattern=None,
-) -> Iterator[Tuple[str, bool]]:
-    """Yield *(line, is_match)* pairs after applying time/level/pattern filters."""
+    field_filters: Optional[List[str]] = None,
+) -> Iterator[str]:
+    """Yield lines that pass all active filters."""
+    fe: Optional[FieldExtractor] = None
+    if field_filters:
+        fe = FieldExtractor(required_fields=parse_field_filters(field_filters))
+
     for line in lines:
         stripped = line.rstrip("\n")
-        match = (
-            matches_time_range(stripped, start, end)
-            and matches_level(stripped, level)
-            and matches_pattern(stripped, pattern)
-        )
-        yield stripped, match
+        if level and not matches_level(stripped, level):
+            continue
+        if pattern and not matches_pattern(stripped, pattern):
+            continue
+        if (start or end) and not matches_time_range(stripped, start, end):
+            continue
+        if fe and not fe.matches(stripped):
+            continue
+        yield stripped
 
 
 def build_pipeline(
-    lines: Iterable[str],
+    lines: List[str],
     *,
+    level: Optional[str] = None,
+    pattern: Optional[str] = None,
     start=None,
     end=None,
-    level: str | None = None,
-    pattern: str | None = None,
-    before: int = 0,
-    after: int = 0,
-    dedupe_window: int = 0,
-    every_n: int = 1,
-    fraction: float = 1.0,
     color: bool = False,
-) -> Iterator[str]:
-    """Run *lines* through the full logslice pipeline and yield output strings."""
+    before_context: int = 0,
+    after_context: int = 0,
+    deduplicate: bool = False,
+    sample_every_n: Optional[int] = None,
+    sample_fraction: Optional[float] = None,
+    max_line_length: Optional[int] = None,
+    max_lines_per_window: Optional[int] = None,
+    rate_window: int = 60,
+    field_filters: Optional[List[str]] = None,
+) -> List[str]:
+    """Run lines through the full pipeline and return output lines."""
+    filtered = list(
+        _apply_filters(
+            lines,
+            level=level,
+            pattern=pattern,
+            start=start,
+            end=end,
+            field_filters=field_filters,
+        )
+    )
 
-    pairs = _apply_filters(lines, start=start, end=end, level=level, pattern=pattern)
+    if deduplicate:
+        dedup = Deduplicator()
+        filtered = dedup.feed(filtered)
 
-    # --- optional deduplication ---
-    if dedupe_window > 0:
-        deduplicator = Deduplicator(window=dedupe_window)
-        pairs = deduplicator.feed(pairs)
+    if sample_every_n is not None or sample_fraction is not None:
+        kwargs = {}
+        if sample_every_n is not None:
+            kwargs["every_n"] = sample_every_n
+        if sample_fraction is not None:
+            kwargs["fraction"] = sample_fraction
+        sampler = Sampler(**kwargs)
+        filtered = sampler.feed(filtered)
 
-    # --- optional sampling ---
-    if every_n > 1 or fraction < 1.0:
-        sampler = Sampler(every_n=every_n, fraction=fraction)
-        pairs = sampler.feed(pairs)
+    if max_line_length is not None:
+        truncator = Truncator(max_length=max_line_length)
+        filtered = truncator.feed(filtered)
 
-    # --- context buffering ---
-    ctx_buf = ContextBuffer(before=before, after=after)
-    ctx_pairs = ctx_buf.apply_context(pairs)
+    if max_lines_per_window is not None:
+        rl = RateLimiter(max_lines=max_lines_per_window, window=rate_window)
+        reporter = BurstReporter(rate_limiter=rl)
+        result: List[str] = []
+        for line in filtered:
+            result.extend(reporter.feed(line))
+        result.extend(reporter.flush())
+        filtered = result
 
-    # --- highlight & emit ---
-    for line, is_match in ctx_pairs:
-        if color and pattern and is_match:
-            line = highlight_matches(line, pattern, color=True)
-        yield line
+    if color and pattern:
+        filtered = [highlight_matches(line, pattern, color=True) for line in filtered]
+
+    if before_context > 0 or after_context > 0:
+        buf = ContextBuffer(before=before_context, after=after_context)
+        ctx_out: List[str] = []
+        all_lines = [l.rstrip("\n") for l in lines]
+        for entry in all_lines:
+            ctx_out.extend(buf.feed(entry, entry in filtered))
+        filtered = ctx_out
+
+    return filtered
