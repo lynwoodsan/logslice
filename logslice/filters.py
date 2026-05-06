@@ -90,10 +90,16 @@ def matches_level(line: str, levels: Optional[list] = None) -> bool:
 
 
 def matches_pattern(line: str, pattern: Optional[str] = None) -> bool:
-    """Return True if the line matches the provided regex pattern."""
+    """Return True if the line matches the provided regex pattern.
+
+    Raises re.error if the pattern is not a valid regular expression.
+    """
     if pattern is None:
         return True
-    return bool(re.search(pattern, line))
+    try:
+        return bool(re.search(pattern, line))
+    except re.error as exc:
+        raise ValueError(f"Invalid regex pattern {pattern!r}: {exc}") from exc
 
 
 def apply_filters(
