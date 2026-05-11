@@ -38,6 +38,17 @@ class Paginator:
         """True when page_size > 0 and we have emitted page_size lines."""
         return self.page_size > 0 and self._emitted >= self.page_size
 
+    @property
+    def remaining(self) -> int | None:
+        """Number of lines that can still be emitted, or None if unlimited.
+
+        Returns ``None`` when ``page_size`` is 0 (unlimited).  Otherwise
+        returns the non-negative count of lines left before the page is full.
+        """
+        if self.page_size == 0:
+            return None
+        return max(0, self.page_size - self._emitted)
+
     # ------------------------------------------------------------------
     # core
     # ------------------------------------------------------------------
